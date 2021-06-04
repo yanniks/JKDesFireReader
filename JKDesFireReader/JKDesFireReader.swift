@@ -121,7 +121,7 @@ public class JKDesFireReader {
         guard tag != nil else {
             return -1
         }
-        return Int(littleEndian: tag!.identifier.withUnsafeBytes { $0.pointee })
+        return Int(littleEndian: tag!.identifier.withUnsafeBytes { $0.load(as: Int.self) })
     }
     
     public func listApplications() -> Promise<[UInt32]> {

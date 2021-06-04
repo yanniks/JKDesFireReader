@@ -34,7 +34,7 @@ class essentials {
             length += 1
         }
         let data: Data = Data(_: inputArray)
-        return UInt32(bigEndian: data.withUnsafeBytes { $0.pointee })
+        return UInt32(bigEndian: data.withUnsafeBytes { $0.load(as: UInt32.self) })
     }
     
     // Convert an UInt32 to an array of bytes with length 4.

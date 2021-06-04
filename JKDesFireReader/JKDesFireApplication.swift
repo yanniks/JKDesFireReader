@@ -80,7 +80,7 @@ public class JKDesFireApplication {
         }
     }
     
-    /*public func getFile(fileId: UInt8) -> Promise<Data> {
+    public func getFile(fileId: UInt8) -> Promise<Data> {
         return Promise<Data> { seal in
             // Check if given file id is a file of this application
             guard (files.contains(fileId)) else {
@@ -90,7 +90,7 @@ public class JKDesFireApplication {
      
             tag.sendRequest(JKDesFireCommands.READ_DATA.rawValue, [fileId, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])
             .done { data in
-                    
+                seal.fulfill(data)
             }.catch { error in
                 // Forward errors
                 if let knownError = error as? JKDesFirePublicError {
@@ -100,7 +100,7 @@ public class JKDesFireApplication {
                 }
             }
         }
-    }*/
+    }
     
     /*public func getRecord(recordId: UInt8) -> Promise<Data> {
         return Promise<Data> { seal in
