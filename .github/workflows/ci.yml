@@ -19,7 +19,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # macos-26 runners ship Xcode 26.x with a versioned path like
+      # macos-26 runners ship Xcode 26.x but with a versioned path like
       # Xcode_26.0.app — pick whichever 26.x is present rather than
       # hard-coding the minor version.
       - name: Select Xcode 26
@@ -30,18 +30,41 @@ jobs:
           xcodebuild -version
           swift --version
 
-      # Use swift package resolve rather than xcodebuild -resolvePackageDependencies;
-      # the latter requires a .xcodeproj which a pure SPM package doesn't have.
+      # Emit the xcodebuild-visible schemes and the first few available iPhone
+      # simulators so failures are immediately diagnosable in the log.
+      - name: Show environment
+        run: |
+          echo "=== Xcodebuild schemes ==="
+          xcodebuild -list 2>&1 || true
+          echo "=== Available iPhone simulators ==="
+          xcrun simctl list devices available | grep -i iphone | head -20
+
       - name: Resolve dependencies
         run: swift package resolve
 
-      # A single xcodebuild test call builds + tests in one step.
-      # Omit OS= so xcodebuild picks the installed simulator runtime automatically.
+      # Dynamically select the first available iPhone simulator so the job
+      # isn't coupled to a specific model name that may differ per runner.
       - name: Run tests
         run: |
+          UDID=$(
+            xcrun simctl list devices available --json \
+            | python3 -c "
+          import json, sys
+          data = json.load(sys.stdin)
+          for runtime, devices in data['devices'].items():
+              if 'iOS' not in runtime and 'com.apple.CoreSimulator.SimRuntime.iOS' not in runtime:
+                  continue
+              for d in devices:
+                  if 'iPhone' in d['name'] and d.get('isAvailable', False):
+                      print(d['udid'])
+                      sys.exit(0)
+          sys.exit(1)
+            "
+          )
+          echo "Using simulator UDID: $UDID"
           xcodebuild test \
             -scheme JKDesFireReader \
-            -destination "platform=iOS Simulator,name=iPhone 17" \
+            -destination "platform=iOS Simulator,id=$UDID" \
             -configuration Debug \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
