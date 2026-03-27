@@ -18,129 +18,134 @@
 //  limitations under the License.
 //
 
-
-//
-//  Session status values
-//  -1: Session invalidated with error
-//  0: Session uninitialized
-//  1: Session initialized
-//  2: Session is starting up
-//  3: Session running
-//
-
 import Foundation
 import CoreNFC
 import os.log
 
-class JKNFCReadingSession: NSObject, NFCTagReaderSessionDelegate {
-    
+// MARK: - Internal event type
+
+/// Events produced by the NFC reading session (internal to this module).
+enum JKNFCTagEvent: Sendable {
+    case detected(any JKDesFireTagProtocol)
+    case error(JKDesFirePublicError)
+}
+
+// MARK: - Session protocol (enables injection / mocking in tests)
+
+/// Internal contract for an NFC reading session.
+/// Consumers iterate `tagStream` to receive tag-detection events.
+/// Because `tagStream` is an `AsyncStream`, callers can call `.shared()`
+/// from swift-async-algorithms to broadcast events to multiple observers.
+protocol JKNFCReadingSessionProtocol: AnyObject {
+    /// An async sequence of tag-detection events.
+    var tagStream: AsyncStream<JKNFCTagEvent> { get }
+    func start()
+    func stop()
+    func stop(errorMessage: String)
+}
+
+// MARK: - Concrete implementation
+
+final class JKNFCReadingSession: NSObject, NFCTagReaderSessionDelegate, JKNFCReadingSessionProtocol {
+
     // MARK: Properties
-    
-    var session: NFCTagReaderSession? = nil
-    var status: Int = 0
-    var miFareTag: NFCMiFareTag? = nil
-    var errorInfoText: String
-    
-    // MARK: Callbacks
-    
-    var sessionTagCallback: (NFCMiFareTag) -> Void
-    var sessionErrorCallback: (JKDesFirePublicError) -> Void
-    
+
+    private var nfcSession: NFCTagReaderSession?
+    private let errorInfoText: String
+    private var continuation: AsyncStream<JKNFCTagEvent>.Continuation?
+
+    private(set) var tagStream: AsyncStream<JKNFCTagEvent>
+
     // MARK: Initialization
-    
-    init(sessionTagCallback: @escaping (NFCMiFareTag) -> Void, sessionErrorCallback: @escaping (JKDesFirePublicError) -> Void) {
-        self.errorInfoText = "Error reading your tag."
-        self.sessionTagCallback = sessionTagCallback
-        self.sessionErrorCallback = sessionErrorCallback
-        super.init()
-        initializeSession(alertMessage: "Hold your NFC tag near the top of your iPhone.")
-    }
-    
-    init(sessionTagCallback: @escaping (NFCMiFareTag) -> Void, sessionErrorCallback: @escaping (JKDesFirePublicError) -> Void, sessionInfoText: String, errorInfoText: String) {
+
+    init(
+        sessionInfoText: String = "Hold your NFC tag near the top of your iPhone.",
+        errorInfoText: String = "Error reading your tag."
+    ) {
         self.errorInfoText = errorInfoText
-        self.sessionTagCallback = sessionTagCallback
-        self.sessionErrorCallback = sessionErrorCallback
+
+        var cont: AsyncStream<JKNFCTagEvent>.Continuation!
+        tagStream = AsyncStream { cont = $0 }
+        continuation = cont
+
         super.init()
-        initializeSession(alertMessage: sessionInfoText)
+
+        nfcSession = NFCTagReaderSession(
+            pollingOption: [.iso14443, .iso15693],
+            delegate: self
+        )
+        nfcSession?.alertMessage = sessionInfoText
     }
-    
-    // MARK: Private helpers
-    
-    private func initializeSession(alertMessage: String) {
-        session = NFCTagReaderSession(pollingOption: [.iso14443, .iso15693], delegate: self)
-        session?.alertMessage = alertMessage
-        status = 1
-    }
-    
-    // MARK: Public functions
-    
+
+    // MARK: JKNFCReadingSessionProtocol
+
     func start() {
-        if (status == 1) {
-            session?.begin()
-            status = 2
-        }
+        nfcSession?.begin()
     }
-    
+
     func stop() {
-        if (status == 3) {
-            session?.invalidate()
-            status = 1
-        }
+        nfcSession?.invalidate()
+        finish()
     }
-    
+
     func stop(errorMessage: String) {
-        if (status == 3) {
-            session?.invalidate(errorMessage: errorMessage)
-            status = 1
-        }
+        nfcSession?.invalidate(errorMessage: errorMessage)
+        finish()
     }
-    
-    func getTagObject() -> NFCMiFareTag? {
-        return miFareTag
+
+    // MARK: Private
+
+    private func finish() {
+        continuation?.finish()
+        continuation = nil
     }
-    
+
     // MARK: NFCTagReaderSessionDelegate
-    
-    func tagReaderSessionDidBecomeActive(_ session: NFCTagReaderSession) {
-        status = 3
-    }
-    
+
+    func tagReaderSessionDidBecomeActive(_ session: NFCTagReaderSession) {}
+
     func tagReaderSession(_ session: NFCTagReaderSession, didInvalidateWithError error: Error) {
-        status = -1
-        os_log("Error in NFC tag reading Session. Reason: %@.", error.localizedDescription)
-        self.sessionErrorCallback(JKDesFirePublicError.ERR_SESSION_INVALIDATED)
+        os_log("NFC session invalidated. Reason: %@", error.localizedDescription)
+        continuation?.yield(.error(.ERR_SESSION_INVALIDATED))
+        finish()
     }
-    
+
     func tagReaderSession(_ session: NFCTagReaderSession, didDetect tags: [NFCTag]) {
-        let tag: NFCTag? = tags.first
-        if case let .miFare(miFareTag) = tag {
-            let miFareType: NFCMiFareFamily = miFareTag.mifareFamily
-            if miFareType == .desfire {
-                session.connect(to: tag!) {(error: Error?) in
-                    guard error == nil else {
-                        return
-                    }
-                    self.miFareTag = miFareTag
-                    self.sessionTagCallback(self.miFareTag!)
-                }
-            } else if miFareType == .plus {
-                session.invalidate(errorMessage: errorInfoText)
-                self.sessionErrorCallback(JKDesFirePublicError.ERR_MIFARE_PLUS)
-            } else if miFareType == .ultralight {
-                session.invalidate(errorMessage: errorInfoText)
-                self.sessionErrorCallback(JKDesFirePublicError.ERR_MIFARE_ULTRALIGHT)
-            } else if miFareType == .unknown {
-                session.invalidate(errorMessage: errorInfoText)
-                self.sessionErrorCallback(JKDesFirePublicError.ERR_MIFARE_UNKNOWN)
-            } else {
-                session.invalidate(errorMessage: errorInfoText)
-                self.sessionErrorCallback(JKDesFirePublicError.ERR_MIFARE_ERROR)
-            }
-        }
-        if (tag == nil) {
-            os_log("Error: No valid tag found.")
+        guard let firstTag = tags.first else {
+            os_log("No tags detected.")
             session.invalidate(errorMessage: errorInfoText)
-            self.sessionErrorCallback(JKDesFirePublicError.ERR_NO_TAG_FOUND)
+            continuation?.yield(.error(.ERR_NO_TAG_FOUND))
+            return
+        }
+
+        guard case let .miFare(miFareTag) = firstTag else {
+            session.invalidate(errorMessage: errorInfoText)
+            continuation?.yield(.error(.ERR_MIFARE_ERROR))
+            return
+        }
+
+        let family = miFareTag.mifareFamily
+        guard family == .desfire else {
+            let error: JKDesFirePublicError
+            switch family {
+            case .plus:      error = .ERR_MIFARE_PLUS
+            case .ultralight: error = .ERR_MIFARE_ULTRALIGHT
+            case .unknown:   error = .ERR_MIFARE_UNKNOWN
+            default:         error = .ERR_MIFARE_ERROR
+            }
+            session.invalidate(errorMessage: errorInfoText)
+            continuation?.yield(.error(error))
+            return
+        }
+
+        session.connect(to: firstTag) { [weak self] connectError in
+            guard let self else { return }
+            if connectError != nil {
+                self.continuation?.yield(.error(.ERR_COMMAND_EXECUTION_ERROR))
+                return
+            }
+            let wrapper = JKNFCMiFareTagWrapper(tag: miFareTag)
+            self.continuation?.yield(.detected(wrapper))
         }
     }
 }

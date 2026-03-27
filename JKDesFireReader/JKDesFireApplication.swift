@@ -19,147 +19,86 @@
 //
 
 import Foundation
-import CoreNFC
-import PromiseKit
 
-public class JKDesFireApplication {
-    
+// MARK: - Protocol
+
+/// Public contract for a DesFire application, enabling full substitution in tests.
+public protocol JKDesFireApplicationProtocol {
+    /// The 3-byte application identifier.
+    var applicationId: UInt32 { get }
+    /// The list of file identifiers belonging to this application.
+    var files: [UInt8] { get }
+
+    /// Returns the settings object for the given file.
+    func getFileSettings(fileId: UInt8) async throws -> JKDesFireFileSettingsProtocol
+    /// Returns the raw data of a standard or backup data file.
+    func getFile(fileId: UInt8) async throws -> Data
+    /// Returns a value-file object for the given file ID.
+    func getValue(fileId: UInt8) async throws -> JKDesFireValueFile
+}
+
+// MARK: - Concrete implementation
+
+public class JKDesFireApplication: JKDesFireApplicationProtocol {
+
     // MARK: Properties
-    
+
     let id: UInt32
-    let tag: NFCMiFareTag
-    var files: [UInt8] = [UInt8]()
-    
-    // MARK: Initialization
-    
-    init(id: UInt32, tag: NFCMiFareTag) {
+    let tag: any JKDesFireTagProtocol
+    private(set) public var files: [UInt8] = []
+
+    // MARK: Initialization (internal — created by JKDesFireReader.selectApplication)
+
+    init(id: UInt32, tag: any JKDesFireTagProtocol) {
         self.id = id
         self.tag = tag
     }
-    
-    // MARK: Actions
-    
-    func listApplications() -> Promise<Bool> {
-        return Promise<Bool> { seal in
-            tag.sendCommand(JKDesFireCommands.GET_FILES.rawValue)
-            .done { data in
-                self.files = [UInt8](data)
-                seal.fulfill(true)
-            }.catch { error in
-                seal.reject(error)
-            }
+
+    // MARK: JKDesFireApplicationProtocol
+
+    public var applicationId: UInt32 { id }
+
+    /// Loads the file-ID list from the card. Called internally by `selectApplication`.
+    func loadFiles() async throws {
+        let data = try await tag.sendCommand(JKDesFireCommands.GET_FILES.rawValue)
+        files = [UInt8](data)
+    }
+
+    public func getFileSettings(fileId: UInt8) async throws -> JKDesFireFileSettingsProtocol {
+        let data = try await tag.sendRequest(
+            JKDesFireCommands.GET_FILE_SETTINGS.rawValue,
+            [fileId]
+        )
+        guard let settings = JKDesFireFileSettings.createFileSettingsObject(data: [UInt8](data)) else {
+            throw JKDesFirePublicError.ERR_UNKNOWN_FILE_TYPE
         }
+        return settings
     }
-    
-    public func getFileSettings(fileId: UInt8) -> Promise<JKDesFireFileSettingsProtocol> {
-        return Promise<JKDesFireFileSettingsProtocol> { seal in
-            tag.sendRequest(JKDesFireCommands.GET_FILE_SETTINGS.rawValue, [fileId])
-            .done { data in
-                // Convert response from card to byte array
-                let response: [UInt8] = [UInt8](data)
-                
-                // Create file settings object and return it
-                let fileSettings: JKDesFireFileSettingsProtocol? = JKDesFireFileSettings.createFileSettingsObject(data: response)
-                
-                // Check for error
-                guard (fileSettings != nil) else {
-                    seal.reject(JKDesFirePublicError.ERR_UNKNOWN_FILE_TYPE)
-                    return
-                }
-                
-                // Resolve promise with file settings object
-                seal.fulfill(fileSettings!)
-            }.catch { error in
-                // Forward errors
-                if let knownError = error as? JKDesFirePublicError {
-                    seal.reject(knownError)
-                } else {
-                    seal.reject(JKDesFirePublicError.ERR_UNKNOWN_ERROR)
-                }
-            }
+
+    public func getFile(fileId: UInt8) async throws -> Data {
+        guard files.contains(fileId) else {
+            throw JKDesFirePublicError.ERR_FILE_NOT_FOUND
         }
+        return try await tag.sendRequest(
+            JKDesFireCommands.READ_DATA.rawValue,
+            [fileId, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]
+        )
     }
-    
-    public func getFile(fileId: UInt8) -> Promise<Data> {
-        return Promise<Data> { seal in
-            // Check if given file id is a file of this application
-            guard (files.contains(fileId)) else {
-                seal.reject(JKDesFirePublicError.ERR_FILE_NOT_FOUND)
-                return
-            }
-     
-            tag.sendRequest(JKDesFireCommands.READ_DATA.rawValue, [fileId, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])
-            .done { data in
-                seal.fulfill(data)
-            }.catch { error in
-                // Forward errors
-                if let knownError = error as? JKDesFirePublicError {
-                    seal.reject(knownError)
-                } else {
-                    seal.reject(JKDesFirePublicError.ERR_UNKNOWN_ERROR)
-                }
-            }
+
+    public func getValue(fileId: UInt8) async throws -> JKDesFireValueFile {
+        guard files.contains(fileId) else {
+            throw JKDesFirePublicError.ERR_FILE_NOT_FOUND
         }
+        let data = try await tag.sendRequest(
+            JKDesFireCommands.READ_VALUE.rawValue,
+            [fileId]
+        )
+        return JKDesFireValueFile(data: [UInt8](data))
     }
-    
-    /*public func getRecord(recordId: UInt8) -> Promise<Data> {
-        return Promise<Data> { seal in
-             // Check if given file id is a file of this application
-             guard (files.contains(fileId)) else {
-                 seal.reject(JKDesFirePublicError.ERR_FILE_NOT_FOUND)
-                 return
-             }
-     
-            tag.sendRequest(JKDesFireCommands.READ_RECORD.rawValue, [recordId, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])
-            .done { record in
-                    
-            }.catch { error in
-                // Forward errors
-                if let knownError = error as? JKDesFirePublicError {
-                    seal.reject(knownError)
-                } else {
-                    seal.reject(JKDesFirePublicError.ERR_UNKNOWN_ERROR)
-                }
-            }
-        }
-    }*/
-    
-    public func getValue(fileId: UInt8) -> Promise<JKDesFireValueFile> {
-        return Promise<JKDesFireValueFile> { seal in
-            //seal.reject(JKDesFirePublicError.ERR_FILE_NOT_FOUND)
-            // Check if given file id is a file of this application
-            guard (files.contains(fileId)) else {
-                seal.reject(JKDesFirePublicError.ERR_FILE_NOT_FOUND)
-                return
-            }
-            
-            tag.sendRequest(JKDesFireCommands.READ_VALUE.rawValue, [fileId])
-            .done { value in
-                // Return value file object
-                seal.fulfill(JKDesFireValueFile(data: [UInt8](value)))
-            }.catch { error in
-                // Forward errors
-                if let knownError = error as? JKDesFirePublicError {
-                    seal.reject(knownError)
-                } else {
-                    seal.reject(JKDesFirePublicError.ERR_UNKNOWN_ERROR)
-                }
-            }
-        }
-    }
-    
-    // MARK: Getters
-    
-    public func getApplicationId() -> UInt32 {
-        return id
-    }
-    
-    public func getFileCount() -> Int {
-        return files.count
-    }
-    
-    public func getFiles() -> [UInt8] {
-        return files
-    }
-    
+
+    // MARK: Legacy getters (preserve source compatibility)
+
+    public func getApplicationId() -> UInt32 { id }
+    public func getFileCount() -> Int { files.count }
+    public func getFiles() -> [UInt8] { files }
 }

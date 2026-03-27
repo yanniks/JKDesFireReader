@@ -20,195 +20,189 @@
 
 import Foundation
 import CoreNFC
-import PromiseKit
+import AsyncAlgorithms
 
 public class JKDesFireReader {
-    
-    // MARK: Properties
-    
-    var readerSession: JKNFCReadingSession?
-    var tag: NFCMiFareTag?
-    var status: Int = 0
-    var sessionInfoText: String?
-    var errorInfoText: String?
-    var lastOccuredError: JKDesFirePublicError?
-    let delegate: JKDesFireReaderDelegate
-    
-    // MARK: Initialization
-    
-    public init(start: Bool, delegate: JKDesFireReaderDelegate) {
+
+    // MARK: - Public session-event stream
+    //
+    // `sessionEvents` is backed by an `AsyncStream` and exposed as an
+    // `AsyncSharedSequence` via swift-async-algorithms' `shared()`.
+    //
+    // This means **multiple concurrent consumers** (e.g. a UI layer and a
+    // logging layer) can each `for await event in reader.sessionEvents { … }`
+    // independently and both will receive every event — no element is lost to
+    // one consumer because another consumed it first.
+    //
+    // Example:
+    //   Task { for await event in reader.sessionEvents { updateUI(event) } }
+    //   Task { for await event in reader.sessionEvents { log(event) } }
+
+    public let sessionEvents: AsyncSharedSequence<AsyncStream<JKDesFireSessionEvent>>
+
+    // MARK: - Internal state
+
+    private var _eventsContinuation: AsyncStream<JKDesFireSessionEvent>.Continuation?
+
+    private var nfcSession: (any JKNFCReadingSessionProtocol)?
+
+    /// Injected factory — replaced with a mock factory during unit tests.
+    var sessionFactory: (_ sessionInfoText: String, _ errorInfoText: String) -> any JKNFCReadingSessionProtocol
+
+    private var tag: (any JKDesFireTagProtocol)?
+    private var status: Int = 0
+    private var lastOccuredError: JKDesFirePublicError?
+    private var sessionInfoText: String?
+    private var errorInfoText: String?
+
+    /// Optional delegate for tag-detection callbacks (runs on the calling task's context).
+    public weak var delegate: (any JKDesFireReaderDelegate)?
+
+    // MARK: - Initialization
+
+    /// Creates a reader with an optional delegate.
+    /// Call `createReaderSession()` to begin scanning.
+    public convenience init(delegate: (any JKDesFireReaderDelegate)? = nil) {
+        self.init(delegate: delegate, sessionFactory: { info, error in
+            JKNFCReadingSession(sessionInfoText: info, errorInfoText: error)
+        })
+    }
+
+    /// Designated initialiser — allows injecting a custom session factory for testing.
+    init(
+        delegate: (any JKDesFireReaderDelegate)? = nil,
+        sessionFactory: @escaping (_ sessionInfoText: String, _ errorInfoText: String) -> any JKNFCReadingSessionProtocol
+    ) {
         self.delegate = delegate
-        if start {
-            _ = createReaderSession()
-        }
+        self.sessionFactory = sessionFactory
+
+        // Build the backing AsyncStream and expose it as a shared sequence.
+        var cont: AsyncStream<JKDesFireSessionEvent>.Continuation!
+        let stream = AsyncStream<JKDesFireSessionEvent> { cont = $0 }
+        _eventsContinuation = cont
+        sessionEvents = stream.shared()
     }
-    
-    // MARK: Callbacks
-    
-    private func sessionDidDetectTag(tag: NFCMiFareTag) {
-        status = 2
-        self.tag = tag
-        delegate.didDetectDesFireTag()
-    }
-    
-    private func sessionThrowError(error: JKDesFirePublicError) {
-        status = -1
-        lastOccuredError = error
-        delegate.tagDetectionError(error: error)
-    }
-    
-    // MARK: Public functions
-    
+
+    // MARK: - Session lifecycle
+
+    /// Starts a new NFC reading session.
+    /// Returns `false` if a session is already running.
+    @discardableResult
     public func createReaderSession() -> Bool {
-        if readerSession == nil {
-            status = 1
-            if sessionInfoText != nil && errorInfoText != nil {
-                readerSession = JKNFCReadingSession(sessionTagCallback: sessionDidDetectTag(tag:), sessionErrorCallback: sessionThrowError(error:), sessionInfoText: sessionInfoText!, errorInfoText: errorInfoText!)
-                readerSession?.start()
-            } else {
-                readerSession = JKNFCReadingSession(sessionTagCallback: sessionDidDetectTag(tag:), sessionErrorCallback: sessionThrowError(error:))
-                readerSession?.start()
+        guard nfcSession == nil else { return false }
+
+        let info  = sessionInfoText  ?? "Hold your NFC tag near the top of your iPhone."
+        let error = errorInfoText    ?? "Error reading your tag."
+        let session = sessionFactory(info, error)
+        nfcSession = session
+        status = 1
+
+        // Consume the NFC session's tag stream in a background Task.
+        // Because we call `.shared()` on `session.tagStream` here, any
+        // additional observer that calls `.shared()` on the same stream
+        // would also receive all events — demonstrating the share() pattern
+        // at the NFC session level too.
+        let sharedTagStream = session.tagStream.shared()
+
+        Task { [weak self] in
+            for await event in sharedTagStream {
+                await self?.handle(tagEvent: event)
             }
-            return true
-        } else {
-            return false
+            // Stream finished — clean up continuation
+            self?._eventsContinuation?.finish()
+            self?._eventsContinuation = nil
         }
+
+        session.start()
+        return true
     }
-    
-    public func setSessionInfoText(text: String) {
-        sessionInfoText = text
-    }
-    
-    public func setErrorInfoText(text: String) {
-        errorInfoText = text
-    }
-    
+
+    public func setSessionInfoText(text: String) { sessionInfoText = text }
+    public func setErrorInfoText(text: String)   { errorInfoText = text }
+
     public func stopRunningSession() {
-        if readerSession != nil {
-            readerSession?.stop()
-            readerSession = nil
-        }
+        nfcSession?.stop()
+        nfcSession = nil
     }
-    
+
     public func stopRunningSession(errorMessage: String) {
-        if readerSession != nil {
-            readerSession?.stop(errorMessage: errorMessage)
-            readerSession = nil
-        }
+        nfcSession?.stop(errorMessage: errorMessage)
+        nfcSession = nil
     }
-    
-    public func sessionIsOpen() -> Bool {
-        if status == 2 {
-            return true
-        }
-        return false
-    }
-    
-    public func getErrorStatus() -> Bool {
-        if status < 0 {
-            return true
-        }
-        return false
-    }
-    
+
+    public func sessionIsOpen() -> Bool { status == 2 }
+    public func getErrorStatus() -> Bool { status < 0 }
+
     public func getErrorReason() -> JKDesFirePublicError {
-        return lastOccuredError!
+        lastOccuredError!
     }
-    
-    // MARK: DesFire functions
-    
+
+    // MARK: - Tag information
+
     public func getTagId() -> Int {
-        guard tag != nil else {
-            return -1
-        }
-        return Int(littleEndian: tag!.identifier.withUnsafeBytes { $0.load(as: Int.self) })
+        guard let tag else { return -1 }
+        return Int(littleEndian: tag.identifier.withUnsafeBytes { $0.load(as: Int.self) })
     }
-    
-    public func listApplications() -> Promise<[UInt32]> {
-        return Promise<[UInt32]> { seal in
-            // Check if a tag is present
-            if (tag == nil) {
-                seal.reject(JKDesFirePublicError.ERR_NO_TAG_FOUND)
-            }
-            tag!.sendCommand(JKDesFireCommands.GET_APPLICATION_DIRECTORY.rawValue)
-            .done { data in
-                // Create byte array from input data
-                let byteArray: [UInt8] = [UInt8](data)
-                
-                // Byte count must be a multiple of 3, otherwise we don't have valid application ids
-                guard (byteArray.count % 3 == 0) else {
-                    NSLog("Response byte count is not a multiple of 3. Aborting.")
-                    seal.reject(JKDesFirePublicError.ERR_UNKNOWN_RESULT)
-                    return
-                }
-                
-                // Convert application ids to integer values
-                var applicationIds: [UInt32] = [UInt32]()
-                var byteCounter: Int = 0
-                for _ in 0...(byteArray.count / 3 - 1) {
-                    let idAsBytes: [UInt8] = Array(byteArray[byteCounter...(byteCounter + 2)])
-                    applicationIds.append(essentials.byteArrayToInt(input: idAsBytes)!)
-                    byteCounter += 3
-                }
-                seal.fulfill(applicationIds)
-            }.catch { error in
-                NSLog("NFC command has thrown an error. Reason: " + error.localizedDescription)
-            }
+
+    // MARK: - DesFire commands
+
+    /// Lists all application IDs stored on the currently connected tag.
+    public func listApplications() async throws -> [UInt32] {
+        guard let tag else { throw JKDesFirePublicError.ERR_NO_TAG_FOUND }
+
+        let data = try await tag.sendCommand(JKDesFireCommands.GET_APPLICATION_DIRECTORY.rawValue)
+        let bytes = [UInt8](data)
+
+        guard bytes.count % 3 == 0 else {
+            throw JKDesFirePublicError.ERR_UNKNOWN_RESULT
         }
+
+        var ids: [UInt32] = []
+        var offset = 0
+        while offset < bytes.count {
+            let slice = Array(bytes[offset ..< offset + 3])
+            guard let id = essentials.byteArrayToInt(input: slice) else {
+                throw JKDesFirePublicError.ERR_UNKNOWN_RESULT
+            }
+            ids.append(id)
+            offset += 3
+        }
+        return ids
     }
-    
-    public func selectApplication(applicationId: UInt32) -> Promise<JKDesFireApplication> {
-        return Promise<JKDesFireApplication> { seal in
-            // Create an empty byte array
-            var byteArray: [UInt8] = [UInt8]()
-            
-            // Loop through the converted integer, remove most significant zeroes
-            for byte in essentials.intToByteArray(applicationId) {
-                if (byte != 0) {
-                    byteArray.append(byte)
-                }
-            }
-            
-            // Check length
-            guard (byteArray.count == 3) else {
-                seal.reject(JKDesFirePublicError.ERR_WRONG_INPUT_LENGTH)
-                return
-            }
-            
-            // Check if a tag is present
-            if (tag == nil) {
-                seal.reject(JKDesFirePublicError.ERR_NO_TAG_FOUND)
-            }
-            // Send request to card and handle promise
-            tag!.sendRequest(JKDesFireCommands.SELECT_APPLICATION.rawValue, byteArray).asVoid()
-            .done { data in
-                let applicationObject = JKDesFireApplication(id: applicationId, tag: self.tag!)
-                    
-                // Read file list on card
-                applicationObject.listApplications()
-                .done { status in
-                    if (status) {
-                        seal.fulfill(applicationObject)
-                    } else {
-                        seal.reject(JKDesFirePublicError.ERR_COMMAND_EXECUTION_ERROR)
-                    }
-                }.catch { error in
-                    // Forward errors
-                    if let knownError = error as? JKDesFirePublicError {
-                        seal.reject(knownError)
-                    } else {
-                        seal.reject(JKDesFirePublicError.ERR_UNKNOWN_ERROR)
-                    }
-                }
-            }.catch { error in
-                // Forward errors
-                if let knownError = error as? JKDesFirePublicError {
-                    seal.reject(knownError)
-                } else {
-                    seal.reject(JKDesFirePublicError.ERR_UNKNOWN_ERROR)
-                }
-            }
+
+    /// Selects an application by its 3-byte ID and returns the application object.
+    public func selectApplication(applicationId: UInt32) async throws -> any JKDesFireApplicationProtocol {
+        guard let tag else { throw JKDesFirePublicError.ERR_NO_TAG_FOUND }
+
+        // Convert to trimmed 3-byte representation
+        let allBytes = essentials.intToByteArray(applicationId).filter { $0 != 0 }
+        guard allBytes.count == 3 else {
+            throw JKDesFirePublicError.ERR_WRONG_INPUT_LENGTH
+        }
+
+        // SELECT_APPLICATION returns nothing useful in the payload
+        _ = try await tag.sendRequest(JKDesFireCommands.SELECT_APPLICATION.rawValue, allBytes)
+
+        let application = JKDesFireApplication(id: applicationId, tag: tag)
+        try await application.loadFiles()
+        return application
+    }
+
+    // MARK: - Private event handler
+
+    private func handle(tagEvent event: JKNFCTagEvent) {
+        switch event {
+        case .detected(let detectedTag):
+            status = 2
+            tag = detectedTag
+            _eventsContinuation?.yield(.tagDetected)
+            delegate?.didDetectDesFireTag()
+
+        case .error(let error):
+            status = -1
+            lastOccuredError = error
+            _eventsContinuation?.yield(.error(error))
+            delegate?.tagDetectionError(error: error)
         }
     }
-    
 }
