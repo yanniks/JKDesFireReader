@@ -77,9 +77,8 @@ public class JKDesFireReader {
         self.sessionFactory = sessionFactory
 
         // Build the backing AsyncStream and expose it as a shared sequence.
-        var cont: AsyncStream<JKDesFireSessionEvent>.Continuation!
-        let stream = AsyncStream<JKDesFireSessionEvent> { cont = $0 }
-        _eventsContinuation = cont
+        let (stream, continuation) = AsyncStream.makeStream(of: JKDesFireSessionEvent.self)
+        _eventsContinuation = continuation
         sessionEvents = stream.shared()
     }
 

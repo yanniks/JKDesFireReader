@@ -64,9 +64,7 @@ final class JKNFCReadingSession: NSObject, NFCTagReaderSessionDelegate, JKNFCRea
     ) {
         self.errorInfoText = errorInfoText
 
-        var cont: AsyncStream<JKNFCTagEvent>.Continuation!
-        tagStream = AsyncStream { cont = $0 }
-        continuation = cont
+        (tagStream, continuation) = AsyncStream.makeStream(of: JKNFCTagEvent.self)
 
         super.init()
 

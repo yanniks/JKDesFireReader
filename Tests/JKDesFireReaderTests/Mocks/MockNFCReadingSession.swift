@@ -19,9 +19,7 @@ final class MockNFCReadingSession: JKNFCReadingSessionProtocol {
     private(set) var stopErrorMessage: String?
 
     init() {
-        var cont: AsyncStream<JKNFCTagEvent>.Continuation!
-        tagStream = AsyncStream { cont = $0 }
-        continuation = cont
+        (tagStream, continuation) = AsyncStream.makeStream(of: JKNFCTagEvent.self)
     }
 
     func start() { startCalled = true }
