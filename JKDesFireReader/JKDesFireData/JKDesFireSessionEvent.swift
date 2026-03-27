@@ -1,9 +1,6 @@
 //
-//  JKDesFireReader+Combine.swift
+//  JKDesFireSessionEvent.swift
 //  JKDesFireReader
-//
-//  Created by Yannik Ehlert on 05.06.2021.
-//  Copyright © 2021 Yannik Ehlert. All rights reserved.
 //
 //  Licensed under the Apache License, Version 2.0 (the "License");
 //  you may not use this file except in compliance with the License.
@@ -18,19 +15,12 @@
 //  limitations under the License.
 //
 
-import Combine
 import Foundation
 
-public extension JKDesFireReader {
-    func listApplications() -> Future<[UInt32], Error> {
-        toFuture {
-            self.listApplications()
-        }
-    }
-    
-    func selectApplication(applicationId: UInt32) -> Future<JKDesFireApplication, Error> {
-        toFuture {
-            self.selectApplication(applicationId: applicationId)
-        }
-    }
+/// Events emitted on `JKDesFireReader.sessionEvents` as the NFC session progresses.
+public enum JKDesFireSessionEvent: Sendable {
+    /// A DesFire tag was detected and connected successfully.
+    case tagDetected
+    /// Tag detection failed or the session was invalidated.
+    case error(JKDesFirePublicError)
 }

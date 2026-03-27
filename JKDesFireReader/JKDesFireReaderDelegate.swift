@@ -20,7 +20,14 @@
 
 import Foundation
 
-public protocol JKDesFireReaderDelegate {
+/// Callback interface for NFC tag detection events.
+///
+/// Adopt this protocol when you prefer a delegate-based approach to observing
+/// session events. For reactive consumption, use ``JKDesFireReader/sessionEvents``
+/// instead (or both simultaneously — they are independent).
+public protocol JKDesFireReaderDelegate: AnyObject {
+    /// Called on the main actor when a DesFire tag has been detected and connected.
     func didDetectDesFireTag()
+    /// Called on the main actor when tag detection fails.
     func tagDetectionError(error: JKDesFirePublicError)
 }
