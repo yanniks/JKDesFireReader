@@ -13,18 +13,18 @@ jobs:
   # ─────────────────────────────────────────────────────────────────────────────
   test:
     name: Build & Test (iOS Simulator)
-    runs-on: macos-15
+    runs-on: macos-26
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # macos-15 runners ship Xcode 16.x but with a versioned path like
-      # Xcode_16.2.app — pick whichever 16.x is present rather than
+      # macos-26 runners ship Xcode 26.x with a versioned path like
+      # Xcode_26.0.app — pick whichever 26.x is present rather than
       # hard-coding the minor version.
-      - name: Select Xcode 16
+      - name: Select Xcode 26
         run: |
-          XCODE=$(ls -d /Applications/Xcode_16*.app 2>/dev/null | sort -V | tail -1)
+          XCODE=$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -1)
           echo "Selecting $XCODE"
           sudo xcode-select -s "$XCODE"
           xcodebuild -version
@@ -41,7 +41,7 @@ jobs:
         run: |
           xcodebuild test \
             -scheme JKDesFireReader \
-            -destination "platform=iOS Simulator,name=iPhone 16" \
+            -destination "platform=iOS Simulator,name=iPhone 17" \
             -configuration Debug \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
@@ -60,7 +60,7 @@ jobs:
   # ─────────────────────────────────────────────────────────────────────────────
   package-lint:
     name: Validate Package.swift
-    runs-on: macos-15
+    runs-on: macos-26
 
     steps:
       - name: Checkout
